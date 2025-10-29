@@ -14,18 +14,13 @@ await Actor.init();
 async function main() {
     const input = (await Actor.getInput()) || {};
     const {
-        // Search & limits
         keyword = '',
         datePosted = 'all',
         results_wanted: MAX_ITEMS_RAW = 80,
         max_pages: MAX_PAGES_RAW = 25,
         collectDetails = true,
-
-        // Start points (we’ll add robust defaults)
         startUrl: startUrls = [],
         url,
-
-        // Anti-block tuning
         proxyConfiguration,
         minDelayMs = 700,
         maxDelayMs = 1600,
@@ -55,7 +50,6 @@ async function main() {
                b.includes('cloudflare') && (b.includes('checking your browser') || b.includes('verify you are a human'));
     };
 
-    // date filter
     const isWithinDateFilter = (dateStr, filter) => {
         if (!dateStr || filter === 'all') return true;
         const now = new Date();
@@ -95,11 +89,8 @@ async function main() {
         return 'https://www.rozee.pk/job/jsearch/q/all';
     };
 
-    // Parse detail URLs from JSON-LD / embedded state / DOM
     function parseJobDetailLinks($, base) {
         const links = new Set();
-
-        // JSON-LD (ItemList or JobPosting)
         $('script[type="application/ld+json"]').each((_, el) => {
             try {
                 const blk = $(el).contents().text().trim();
@@ -123,7 +114,6 @@ async function main() {
             } catch {}
         });
 
-        // Generic anchors
         $('a[href]').each((_, el) => {
             const href = $(el).attr('href') || '';
             if (/jobs-\d{5,}/.test(href)) {
@@ -131,29 +121,22 @@ async function main() {
                 if (u) links.add(u.split('?')[0]);
             }
         });
-
-        // Sanitize
         return [...links].filter(u =>
             !/\/company\//i.test(u) && !/\/jsearch\//i.test(u) && !/\/(login|apply)/i.test(u)
         );
     }
 
-    // Pagination discovery
     function findNextPage($, base) {
         const relNext = $('link[rel="next"]').attr('href');
         if (relNext) return toAbs(relNext, base);
-
         const nextByText = $('a:contains("Next"), a:contains("›"), a:contains("»"), [class*="next"]').attr('href');
         if (nextByText) return toAbs(nextByText, base);
-
         const current = $('.pagination .active, .pagination .current, [aria-current="page"], .page-item.active').first().text().trim();
         if (current && !isNaN(+current)) {
             const nextPage = String(+current + 1);
             const nextLink = $(`.pagination a:contains("${nextPage}")`).attr('href');
             if (nextLink) return toAbs(nextLink, base);
         }
-
-        // Query-param fallback
         let fallback = null;
         $('a[href*="page="], a[href*="p="], a[href*="fpn="]').each((_, el) => {
             const href = $(el).attr('href');
@@ -167,19 +150,11 @@ async function main() {
 
     // ---------- seeds ----------
     const seeds = new Set();
-
-    // Good SSR entry points:
-    // A) Jobs-by-city hub → many city lists (SSR)
-    seeds.add('https://www.rozee.pk/EN/jobs-by-city'); // hub of cities (SSR).  // cite
-    // B) Category home (SSR w/ job cards)
-    seeds.add('https://www.rozee.pk/category/Home/');  // cite
-
-    // C) Optional: user-provided URL(s)
+    seeds.add('https://www.rozee.pk/EN/jobs-by-city');
+    seeds.add('https://www.rozee.pk/category/Home/');
     const inputUrls = Array.isArray(startUrls) ? startUrls : (startUrls ? [startUrls] : []);
     inputUrls.forEach(u => { if (typeof u === 'string' && u.includes('rozee.pk')) seeds.add(u); });
     if (url && typeof url === 'string' && url.includes('rozee.pk')) seeds.add(url);
-
-    // D) Best-effort keyword search page (may be SPA/guarded)
     seeds.add(buildKeywordUrl());
 
     const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : undefined;
@@ -194,20 +169,14 @@ async function main() {
         maxRequestRetries: 7,
         useSessionPool: true,
         persistCookiesPerSession: true,
-        sessionPoolOptions: {
-            maxPoolSize: 15,
-            sessionOptions: { maxUsageCount: 20 },
-        },
+        sessionPoolOptions: { maxPoolSize: 15, sessionOptions: { maxUsageCount: 20 } },
         requestHandlerTimeoutSecs: 180,
         navigationTimeoutSecs: 90,
 
-        // Strong HTTP fingerprint via got-scraping
         preNavigationHooks: [
             async ({ request, session }, gotOptions) => {
-                // Per-session stable UA
                 const ua = session?.userData?.ua ||
                     (session.userData.ua = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${110 + Math.floor(Math.random() * 20)}.0.0.0 Safari/537.36`);
-
                 request.headers = {
                     'user-agent': ua,
                     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -215,17 +184,11 @@ async function main() {
                     'cache-control': 'no-cache',
                     'pragma': 'no-cache',
                     'upgrade-insecure-requests': '1',
-                    'sec-fetch-site': 'same-origin',
-                    'sec-fetch-mode': 'navigate',
-                    'sec-fetch-dest': 'document',
                 };
-
-                // got-scraping tuning
                 gotOptions.throwHttpErrors = false;
-                gotOptions.http2 = true; // real browsers prefer h2 here
+                gotOptions.http2 = true;
                 gotOptions.decompress = true;
                 gotOptions.cookieJar = session?.cookieJar;
-                // Header generator (JA3/TLS-like)
                 gotOptions.useHeaderGenerator = true;
                 gotOptions.headerGeneratorOptions = {
                     browsers: [{ name: 'chrome', minVersion: 110, httpVersion: '2' }],
@@ -233,24 +196,7 @@ async function main() {
                     operatingSystems: ['windows'],
                     locales: ['en-US'],
                 };
-
                 await sleep(jitter());
-            },
-        ],
-
-        postNavigationHooks: [
-            async ({ response, session, $, request, log: clog }) => {
-                const status = response?.statusCode || 200;
-                if ([403, 429, 503].includes(status)) {
-                    clog.warning(`HTTP ${status} at ${request.url}, retiring session.`);
-                    session?.retire?.();
-                }
-                if ($ && looksLikeCfBlock($)) {
-                    clog.warning(`Cloudflare/verification page at ${request.url}, retiring session.`);
-                    session?.retire?.();
-                    // Force fail to trigger retry with a new session
-                    throw new Error('Detected Cloudflare interstitial');
-                }
             },
         ],
 
@@ -258,13 +204,12 @@ async function main() {
             const label = request.userData?.label || 'GEN';
             const pageNo = request.userData?.pageNo || 1;
             const status = response?.statusCode || 200;
-
             if ([403, 429, 503].includes(status) || !$) {
                 session?.retire?.();
                 throw new Error(`Blocked or empty DOM on ${request.url} (HTTP ${status})`);
             }
 
-            // 1) HUB: /EN/jobs-by-city  → enqueue city pages
+            // HUB_CITY: /EN/jobs-by-city
             if (label === 'HUB_CITY') {
                 clog.info(`Parsing city hub: ${request.url}`);
                 const cityUrls = [];
@@ -272,29 +217,26 @@ async function main() {
                     const u = toAbs($(el).attr('href'), request.url);
                     if (u && /\/jobs-in-[^/]+\/?/.test(u)) cityUrls.push(u);
                 });
-                // Dedup + enqueue
-                const uniq = [...new Set(cityUrls)].slice(0, 200); // cap
+                const uniq = [...new Set(cityUrls)].slice(0, 200);
                 if (uniq.length) {
                     clog.info(`Enqueueing ${uniq.length} city pages`);
-                    await enqueueLinks({ urls: uniq.map(u => ({ url: u, userData: { label: 'LIST', pageNo: 1 } })) });
+                    await enqueueLinks({
+                        urls: uniq,
+                        transformRequestFunction: (req) => {
+                            req.userData = { label: 'LIST', pageNo: 1 };
+                            return req;
+                        },
+                    });
                 }
                 return;
             }
 
-            // 2) CATEGORY HOME: /category/Home/  → treat as LIST
-            if (label === 'CAT_HOME') {
-                clog.info(`Parsing category home as listing: ${request.url}`);
-                // fall through to LIST logic below by not returning
-            }
-
-            // 3) LIST pages (city/category/search)
-            if (label === 'LIST' || label === 'CAT_HOME' || label === 'GEN') {
+            // LIST pages
+            if (['LIST', 'CAT_HOME', 'GEN'].includes(label)) {
                 clog.info(`LIST page ${pageNo}: ${request.url}`);
-
-                // If CF page slipped through, bail
                 if (looksLikeCfBlock($)) {
                     session?.retire?.();
-                    throw new Error('Detected Cloudflare on LIST page');
+                    throw new Error('Detected Cloudflare');
                 }
 
                 const jobLinks = parseJobDetailLinks($, request.url);
@@ -304,7 +246,11 @@ async function main() {
                     const toEnqueue = jobLinks.slice(0, remaining);
                     if (toEnqueue.length) {
                         await enqueueLinks({
-                            urls: toEnqueue.map(u => ({ url: u, userData: { label: 'DETAIL' } })),
+                            urls: toEnqueue,
+                            transformRequestFunction: (req) => {
+                                req.userData = { label: 'DETAIL' };
+                                return req;
+                            },
                         });
                     }
                 }
@@ -313,7 +259,13 @@ async function main() {
                     const next = findNextPage($, request.url);
                     if (next) {
                         clog.info(`Enqueue next page ${pageNo + 1}: ${next}`);
-                        await enqueueLinks({ urls: [{ url: next, userData: { label: 'LIST', pageNo: pageNo + 1 } }] });
+                        await enqueueLinks({
+                            urls: [next],
+                            transformRequestFunction: (req) => {
+                                req.userData = { label: 'LIST', pageNo: pageNo + 1 };
+                                return req;
+                            },
+                        });
                     }
                 }
 
@@ -321,20 +273,18 @@ async function main() {
                 return;
             }
 
-            // 4) DETAIL pages
+            // DETAIL pages
             if (label === 'DETAIL') {
                 if (saved >= MAX_ITEMS) return;
-
                 if (looksLikeCfBlock($)) {
                     session?.retire?.();
-                    throw new Error('Detected Cloudflare on DETAIL page');
+                    throw new Error('Detected Cloudflare on detail');
                 }
 
                 try {
                     let title, company, jobLocation, datePostedText, jobType, salary, experience, description, category;
                     const skills = new Set();
 
-                    // JSON-LD first
                     $('script[type="application/ld+json"]').each((_, el) => {
                         try {
                             const data = JSON.parse($(el).contents().text().trim());
@@ -343,75 +293,43 @@ async function main() {
                                 if ((item?.['@type'] || '').toLowerCase() === 'jobposting') {
                                     title = title || item.title;
                                     company = company || item.hiringOrganization?.name;
-                                    jobLocation = jobLocation || item.jobLocation?.address?.addressLocality
-                                        || item.jobLocation?.address?.addressRegion
-                                        || item.jobLocation?.address?.addressCountry;
-                                    datePostedText = datePostedText || item.datePosted || item.datePublished;
-                                    jobType = jobType || (Array.isArray(item.employmentType) ? item.employmentType.join(', ') : item.employmentType);
-                                    salary = salary || item.baseSalary?.value?.value || item.baseSalary?.value?.minValue;
-                                    experience = experience || item.experienceRequirements || item.qualifications;
+                                    jobLocation = jobLocation || item.jobLocation?.address?.addressLocality;
+                                    datePostedText = datePostedText || item.datePosted;
+                                    jobType = jobType || item.employmentType;
+                                    salary = salary || item.baseSalary?.value?.value;
                                     description = description || cleanText(item.description);
-                                    category = category || item.industry || item.occupationalCategory;
-
-                                    const skillsBlock = item.skills || item.skill || [];
-                                    (Array.isArray(skillsBlock) ? skillsBlock : [skillsBlock]).forEach(s => {
-                                        if (typeof s === 'string') skills.add(s.trim());
-                                        if (s?.name) skills.add(String(s.name).trim());
-                                    });
                                 }
                             }
                         } catch {}
                     });
 
-                    // DOM fallbacks
-                    if (!title) title = $('h1').first().text().trim() || $('title').text().split('-')[0]?.trim();
-                    if (!company) company = $('a[href*="/company/"]').first().text().trim() || $('[class*="company"]').first().text().trim();
-                    if (!jobLocation) jobLocation = $('[class*="location"], [class*="city"]').first().text().trim() || 'Pakistan';
-                    if (!description || description.length < 40) {
-                        description = cleanText($('[class*="description"], [id*="description"], section:contains("Job Description")').first().html()) ||
-                                      cleanText($('body').html()).slice(0, 2800);
-                    }
-                    if (!salary) {
-                        const sal = $.html().match(/PKR?\.?\s*([\d,.]+(?:\s*-\s*[\d,.]+)?)/i);
-                        if (sal) salary = sal[0].trim();
-                    }
-                    if (!experience) {
-                        const ex = $.html().match(/(\d+)\s*(?:\+?\s*)?(Years?|Year)/i);
-                        if (ex) experience = ex[0].trim();
-                    }
+                    if (!title) title = $('h1').first().text().trim();
+                    if (!company) company = $('a[href*="/company/"]').first().text().trim();
+                    if (!jobLocation) jobLocation = $('[class*="location"]').first().text().trim();
+                    if (!description) description = cleanText($('[class*="description"]').html());
 
-                    if (!isWithinDateFilter(datePostedText, datePosted)) {
-                        clog.info(`Skip (date filter ${datePosted}): ${datePostedText}`);
-                        return;
-                    }
+                    if (!isWithinDateFilter(datePostedText, datePosted)) return;
 
                     const job = {
                         url: request.url,
-                        title: title || 'Unknown Title',
-                        company: company || 'Unknown Company',
+                        title: title || 'Unknown',
+                        company: company || 'Unknown',
                         location: jobLocation || 'Pakistan',
                         salary: salary || 'Not specified',
-                        experience: experience || 'Not specified',
                         jobType: jobType || 'Not specified',
-                        category: category || 'Not specified',
                         description: description || 'No description',
-                        skills: Array.from(skills).join(', ') || 'Not specified',
                         datePosted: datePostedText || 'Unknown',
                         scrapedAt: new Date().toISOString(),
                     };
-
-                    if (!job.title || !job.company) {
-                        failedUrls.push({ url: request.url, reason: 'Missing critical fields' });
-                        return;
-                    }
+                    if (!title || !company) return;
 
                     await Dataset.pushData(job);
                     saved++;
-                    clog.info(`Saved job ${saved}/${MAX_ITEMS}: ${job.title} @ ${job.company}`);
+                    clog.info(`Saved job ${saved}/${MAX_ITEMS}: ${title}`);
                     await sleep(jitter());
                 } catch (err) {
-                    clog.error(`DETAIL error on ${request.url}: ${err?.message}`);
-                    failedUrls.push({ url: request.url, reason: err?.message || String(err) });
+                    clog.error(`DETAIL error ${request.url}: ${err.message}`);
+                    failedUrls.push({ url: request.url, reason: err.message });
                     throw err;
                 }
             }
@@ -424,30 +342,22 @@ async function main() {
         },
     });
 
-    // Queue seeds with specific labels
     const startRequests = [];
     for (const s of seeds) {
-        if (s.includes('/EN/jobs-by-city')) {
-            startRequests.push({ url: s, userData: { label: 'HUB_CITY' } });
-        } else if (s.includes('/category/Home')) {
-            startRequests.push({ url: s, userData: { label: 'CAT_HOME', pageNo: 1 } });
-        } else if (s.includes('/job/jsearch/')) {
-            startRequests.push({ url: s, userData: { label: 'LIST', pageNo: 1 } });
-        } else {
-            startRequests.push({ url: s, userData: { label: 'GEN', pageNo: 1 } });
-        }
+        if (s.includes('/EN/jobs-by-city')) startRequests.push({ url: s, userData: { label: 'HUB_CITY' } });
+        else if (s.includes('/category/Home')) startRequests.push({ url: s, userData: { label: 'CAT_HOME', pageNo: 1 } });
+        else if (s.includes('/job/jsearch/')) startRequests.push({ url: s, userData: { label: 'LIST', pageNo: 1 } });
+        else startRequests.push({ url: s, userData: { label: 'GEN', pageNo: 1 } });
     }
 
     await crawler.run(startRequests);
-
-    log.info('Done', { totalJobsSaved: saved, failedUrls: failedUrls.length, target: MAX_ITEMS });
-    if (failedUrls.length) log.warning('Sample failures', { examples: failedUrls.slice(0, 10) });
+    log.info('Done', { totalJobsSaved: saved, failedUrls: failedUrls.length });
 }
 
 try {
     await main();
 } catch (err) {
-    log.error('Fatal error in main:', err);
+    log.error('Fatal error:', err);
     throw err;
 } finally {
     await Actor.exit();
