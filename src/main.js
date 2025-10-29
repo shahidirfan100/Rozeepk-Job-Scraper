@@ -45,7 +45,8 @@ async function main() {
     if (!Array.isArray(startUrls)) startUrls = [startUrls];
     
     // Filter and validate URLs
-    startUrls = startUrls.filter(u => u && typeof u === 'string' && u.includes('rozee.pk'));
+        let inputUrls = Array.isArray(startUrls) ? [...startUrls] : [startUrls];
+        inputUrls = inputUrls.filter(u => u && typeof u === 'string' && u.includes('rozee.pk'));
 
     const initial = [];
     if (startUrls.length) initial.push(...startUrls);
