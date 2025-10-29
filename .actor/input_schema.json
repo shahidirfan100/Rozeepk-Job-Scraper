@@ -13,15 +13,24 @@
     "keyword": {
       "title": "Keyword (if not using Start URL)",
       "type": "string",
-      "description": "Job search keyword(s), e.g., 'Software Developer', 'Marketing Manager', 'Data Analyst'.",
+      "description": "Job search keyword(s), e.g., 'developer', 'marketing', 'accountant'. Leave empty for all jobs.",
       "editor": "textfield",
-      "prefill": "software engineer"
+      "prefill": "developer"
     },
     "location": {
       "title": "Location (if not using Start URL)",
       "type": "string",
-      "description": "Location filter (optional, Rozee.pk supports location-based searches).",
+      "description": "Location filter (optional, e.g., 'lahore', 'karachi', 'islamabad').",
       "editor": "textfield"
+    },
+    "datePosted": {
+      "title": "Date Posted Filter",
+      "type": "string",
+      "description": "Filter jobs by posting date. Options: 'all', '24hours', '7days', '30days'. Note: Rozee.pk doesn't have native date filters, so this will be applied during scraping.",
+      "editor": "select",
+      "enum": ["all", "24hours", "7days", "30days"],
+      "enumTitles": ["All Jobs", "Last 24 Hours", "Last 7 Days", "Last 30 Days"],
+      "default": "all"
     },
     "collectDetails": {
       "title": "Collect job details",
@@ -35,7 +44,7 @@
       "type": "integer",
       "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
       "minimum": 1,
-      "default": 20,
+      "default": 50,
       "editor": "number"
     },
     "max_pages": {

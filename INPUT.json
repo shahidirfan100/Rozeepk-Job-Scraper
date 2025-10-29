@@ -1,5 +1,10 @@
 {
-  "startUrls": ["https://www.rozee.pk/job/jsearch/q/all"],
+  "keyword": "developer",
+  "datePosted": "7days",
   "results_wanted": 10,
-  "max_pages": 3
+  "max_pages": 3,
+  "collectDetails": true,
+  "proxyConfiguration": {
+    "useApifyProxy": false
+  }
 }
