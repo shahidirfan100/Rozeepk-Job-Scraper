@@ -1,10 +1,11 @@
 {
   "keyword": "developer",
-  "datePosted": "7days",
+  "datePosted": "all",
   "results_wanted": 10,
-  "max_pages": 3,
+  "max_pages": 2,
   "collectDetails": true,
   "proxyConfiguration": {
-    "useApifyProxy": false
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
   }
 }
