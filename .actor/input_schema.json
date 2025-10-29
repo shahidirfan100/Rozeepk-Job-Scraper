@@ -1,0 +1,74 @@
+{
+  "title": "Rozee.pk Jobs Scraper",
+  "description": "Scrape job listings from Rozee.pk. Provide startUrls for specific search pages or leave empty to scrape from the main job search page.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Start scraping from a specific Rozee.pk search URL. If provided, this will be used instead of the default.",
+      "editor": "textfield"
+    },
+    "keyword": {
+      "title": "Keyword (if not using Start URL)",
+      "type": "string",
+      "description": "Job search keyword(s), e.g., 'Software Developer', 'Marketing Manager', 'Data Analyst'.",
+      "editor": "textfield",
+      "prefill": "software engineer"
+    },
+    "location": {
+      "title": "Location (if not using Start URL)",
+      "type": "string",
+      "description": "Location filter (optional, Rozee.pk supports location-based searches).",
+      "editor": "textfield"
+    },
+    "collectDetails": {
+      "title": "Collect job details",
+      "type": "boolean",
+      "description": "If enabled, scraper opens job detail pages for full description.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "results_wanted": {
+      "title": "Maximum number of jobs",
+      "type": "integer",
+      "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
+      "minimum": 1,
+      "default": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum number of pages",
+      "type": "integer",
+      "description": "A safety cap on the number of search result pages to visit.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 20
+    },
+      "cookies": {
+      "title": "Custom cookies (raw header)",
+      "type": "string",
+      "description": "Optional raw 'Cookie' header string. Can help bypass consent banners.",
+      "editor": "textfield"
+    },
+    "cookiesJson": {
+      "title": "Custom cookies (JSON)",
+      "type": "string",
+      "description": "Optional JSON-formatted cookies. Accepts an array (e.g., [{\"name\":\"a\",\"value\":\"1\"}]) or an object map (e.g., {\"a\":\"1\"}).",
+      "editor": "textarea"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy (recommended for Rozee.pk).",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
