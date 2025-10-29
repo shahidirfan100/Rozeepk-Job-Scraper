@@ -1,8 +1,7 @@
 // Rozee.pk jobs scraper - Hardened CheerioCrawler implementation
-// Changes: stronger anti-bot headers, JSON-LD parsing, embedded-state parsing, better pagination,
-// resilient selectors, and stricter session handling.
+// Includes fixes for modern Apify SDK (replaces Actor.utils.sleep with Crawlee's sleep)
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
+import { CheerioCrawler, Dataset, sleep } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
 
 await Actor.init();
@@ -212,7 +211,7 @@ async function main() {
                     const next = findNextPage($, request.url);
                     if (next) await enqueueLinks({ urls: [{ url: next, userData: { label: 'LIST', pageNo: pageNo + 1 } }] });
                 }
-                await Actor.utils.sleep(jitter());
+                await sleep(jitter());
                 return;
             }
 
@@ -265,7 +264,7 @@ async function main() {
                     await Dataset.pushData(job);
                     saved++;
                     crawlerLog.info(`Saved job ${saved}/${MAX_ITEMS}: ${title}`);
-                    await Actor.utils.sleep(jitter());
+                    await sleep(jitter());
                 } catch (err) {
                     crawlerLog.error(`Error extracting ${request.url}: ${err.message}`);
                     failedUrls.push({ url: request.url, reason: err.message });
@@ -289,7 +288,7 @@ async function main() {
                     'cache-control': 'no-cache',
                     'pragma': 'no-cache',
                 };
-                await Actor.utils.sleep(jitter());
+                await sleep(jitter());
                 gotoOptions.throwHttpErrors = false;
                 gotoOptions.timeout = { request: 90000 };
             },
