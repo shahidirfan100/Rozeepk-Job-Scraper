@@ -1,16 +1,30 @@
-FROM alpine:latest
+# ---- Base image: Lightweight Alpine Linux with Node.js 22 ----
+FROM node:22-alpine
 
-RUN apk add --no-cache nodejs npm
-
-RUN addgroup app && adduser app -G app -D
+# ---- Set working directory ----
 WORKDIR /home/app
-USER app
 
-COPY --chown=app:app package*.json ./
-RUN npm i --omit=dev && rm -r ~/.npm || true
+# ---- Copy dependency files and install ----
+COPY package*.json ./
+RUN npm install --omit=dev
 
-COPY --chown=app:app . ./
+# ---- Copy source code and actor files ----
+COPY . ./
 
-ENV APIFY_LOG_LEVEL=ERROR
+# ---- Install tini (for correct signal handling like Apify runtime) ----
+RUN apk add --no-cache tini
 
-CMD npm start --silent
+# ---- Environment variables for Apify SDK local storages ----
+ENV APIFY_DISABLE_OUTDATED_WARNING=1
+ENV APIFY_LOCAL_STORAGE_DIR=/home/app/apify_storage
+
+# ---- Create local Apify storage directories ----
+RUN mkdir -p /home/app/apify_storage/key_value_stores/default \
+    /home/app/apify_storage/datasets/default \
+    /home/app/apify_storage/request_queues/default
+
+# ---- Set tini as init process ----
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# ---- Default command: run your actor ----
+CMD ["node", "src/main.js"]
