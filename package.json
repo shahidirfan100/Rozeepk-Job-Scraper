@@ -11,7 +11,7 @@
     "crawlee": "^3.14.1",
     "cheerio": "^1.0.0-rc.12",
     "got-scraping": "^4.0.3",
-        "jsdom": "^25.0.1",
+    "jsdom": "^25.0.1",
     "linkedom": "^0.18.6",
     "tough-cookie": "^4.1.3"
   }
