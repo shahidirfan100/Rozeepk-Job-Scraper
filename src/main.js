@@ -1,12 +1,7 @@
 /**
- * src/main.js
- * Fully working Rozee.pk job scraper (API + detail pages, no browser).
- * Stack: Apify SDK, gotScraping, linkedom.
- * Features:
- *  - Direct JSON API scraping (bypasses Cloudflare).
- *  - Auto-fetch full job descriptions from each detail page.
- *  - Supports proxies (await proxyConf.newUrl()).
- *  - Rate limiting and pagination.
+ * Rozee.pk job scraper (Next.js JSON API + detail pages)
+ * No browser automation, HTTP-only.
+ * Automatically detects buildId and scrapes job data.
  */
 
 import { Actor, log } from 'apify';
@@ -29,140 +24,126 @@ async function main() {
 
   const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration(proxyConfiguration) : undefined;
   const proxyUrl = proxyConf ? await proxyConf.newUrl() : undefined;
+  const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
   log.info('🚀 Starting Rozee.pk scraper', { keyword, max_pages, results_wanted });
 
-  const API_URL = 'https://www.rozee.pk/job/search';
+  // ---------- 1️⃣ Discover buildId ----------
+  let buildId;
+  try {
+    const res = await gotScraping({
+      url: 'https://www.rozee.pk/',
+      proxyUrl,
+      http2: true,
+      throwHttpErrors: false,
+      headers: { 'user-agent': 'Mozilla/5.0', 'accept-language': 'en-US,en;q=0.9' },
+    });
+    const match = res.body.match(/"buildId":"([^"]+)"/);
+    buildId = match ? match[1] : null;
+  } catch (e) {
+    log.warning(`Failed to detect buildId: ${e.message}`);
+  }
+
+  if (!buildId) throw new Error('❌ Could not extract Next.js buildId — cannot fetch job data');
+
+  log.info(`✅ Found buildId: ${buildId}`);
+
+  // ---------- 2️⃣ Prepare for scraping ----------
   let saved = 0;
 
-  const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
-
-  // Helper: fetch job detail description via linkedom
   async function fetchJobDescription(url) {
     try {
-      const res = await gotScraping({
+      const resp = await gotScraping({
         url,
         http2: true,
         throwHttpErrors: false,
         proxyUrl,
         headers: {
-          'user-agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36`,
+          'user-agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36`,
           'accept-language': 'en-US,en;q=0.9',
         },
       });
 
-      if (res.statusCode >= 400) {
-        log.debug(`Detail fetch failed ${res.statusCode} for ${url}`);
-        return null;
-      }
-
-      const { document } = parseHTML(res.body || '');
-      // Try multiple patterns for job description content
-      const sel = [
-        'div.job-description',
-        'section.job-description',
-        'div[class*="description"]',
-        'section[class*="description"]',
-        'article',
-        '#job-detail',
-      ];
-
-      for (const s of sel) {
-        const el = document.querySelector(s);
-        if (el) {
-          const text = el.textContent.trim().replace(/\s+/g, ' ');
-          if (text.length > 30) return text.slice(0, 4000);
-        }
-      }
-
-      // fallback: <meta name="description">
-      const meta = document.querySelector('meta[name="description"]')?.content;
-      if (meta) return meta.trim();
-
-      return null;
+      if (resp.statusCode >= 400) return null;
+      const { document } = parseHTML(resp.body || '');
+      const el = document.querySelector('div.job-description, section.job-description, div[class*="description"], section[class*="description"], article');
+      const text = el?.textContent?.trim().replace(/\s+/g, ' ') || '';
+      return text.slice(0, 4000) || null;
     } catch (e) {
-      log.debug(`Error fetching detail ${url}: ${e.message}`);
+      log.debug(`Description fetch failed: ${e.message}`);
       return null;
     }
   }
 
+  // ---------- 3️⃣ Loop through pagination ----------
   for (let page = 1; page <= max_pages && saved < results_wanted; page++) {
-    const body = {
-      page,
-      q: keyword,
-      limit: 20,
-    };
+    const url = `https://www.rozee.pk/_next/data/${buildId}/job/jsearch/q/${encodeURIComponent(keyword)}.json?page=${page}`;
+    log.info(`Fetching page ${page}: ${url}`);
 
     try {
       const res = await gotScraping({
-        url: API_URL,
-        method: 'POST',
-        json: body,
+        url,
         proxyUrl,
         http2: true,
         throwHttpErrors: false,
         headers: {
-          'content-type': 'application/json',
-          'user-agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36`,
+          'user-agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36`,
           'accept-language': 'en-US,en;q=0.9',
         },
       });
 
       if (res.statusCode >= 400) {
-        log.warning(`Blocked or failed: HTTP ${res.statusCode} on page ${page}`);
-        await sleep(3000);
+        log.warning(`HTTP ${res.statusCode} on page ${page}`);
         continue;
       }
 
       let json;
       try {
-        json = typeof res.body === 'object' ? res.body : JSON.parse(res.body);
-      } catch {
-        const match = res.body.match(/{[\s\S]+}/);
-        if (match) json = JSON.parse(match[0]);
+        json = JSON.parse(res.body);
+      } catch (err) {
+        log.error(`JSON parse failed for page ${page}: ${err.message}`);
+        continue;
       }
 
-      const jobs = json?.data || json?.results || json?.jobs || [];
-      if (!Array.isArray(jobs) || jobs.length === 0) {
+      const jobs = json?.pageProps?.jobs || json?.pageProps?.results || [];
+      if (!jobs.length) {
         log.info(`No jobs found on page ${page}`);
         continue;
       }
 
-      log.info(`Page ${page}: Found ${jobs.length} jobs`);
+      log.info(`✅ Page ${page}: ${jobs.length} jobs found`);
 
       for (const job of jobs) {
         if (saved >= results_wanted) break;
-
-        const jobUrl = job.job_url || `https://www.rozee.pk/${job.slug || ''}`;
-        const description = await fetchJobDescription(jobUrl);
+        const jobUrl = job.jobUrl || job.url || `https://www.rozee.pk/job/${job.slug || ''}`;
+        const desc = await fetchJobDescription(jobUrl);
 
         const item = {
-          id: job.job_id || job.id,
-          title: job.job_title || job.title,
-          company: job.company_name || job.company || 'Unknown',
+          title: job.title || job.jobTitle,
+          company: job.company || job.companyName || 'Unknown',
           location: job.location || job.city || 'Pakistan',
-          datePosted: job.posted_date || job.date_posted,
+          datePosted: job.postedOn || job.postedDate,
           url: jobUrl,
           salary: job.salary || 'Not specified',
-          experience: job.experience || job.exp_required || '',
+          experience: job.experience || job.expRequired || '',
           category: job.category || job.industry || '',
-          description: description || 'No description found',
+          description: desc || 'No description found',
           scrapedAt: new Date().toISOString(),
         };
 
         await Dataset.pushData(item);
         saved++;
-        log.info(`✅ [${saved}] ${item.title} @ ${item.company}`);
+        log.info(`💼 [${saved}] ${item.title} @ ${item.company}`);
         await sleep(jitter(minDelayMs, maxDelayMs));
       }
 
       await sleep(jitter(minDelayMs, maxDelayMs));
-    } catch (err) {
-      log.error(`Error page ${page}: ${err.message}`);
+    } catch (e) {
+      log.error(`Error on page ${page}: ${e.message}`);
     }
   }
 
-  log.info(`🎯 Done. Total saved: ${saved}`);
+  log.info(`🎯 Done. Total jobs saved: ${saved}`);
 }
 
 try {
