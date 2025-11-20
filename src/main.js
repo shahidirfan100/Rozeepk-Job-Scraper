@@ -46,7 +46,7 @@ const buildStartUrl = (kw, loc, cat) => {
     if (kw && kw.trim()) {
         path = `q/${encodeURIComponent(kw.trim())}`;
     }
-    // NOTE: location & category could be wired in here if Rozee search supports it.
+    // NOTE: location & category can be wired in here if Rozee search supports it.
     return `https://www.rozee.pk/job/jsearch/${path}/fc/1`;
 };
 
@@ -60,7 +60,7 @@ const buildNextPageUrl = (currentUrl, nextPageNo) => {
             url.pathname = '/' + parts.join('/');
             return url.toString();
         }
-        // Fallback: simple ?page=n pattern
+        // Fallback: simple ?page=n
         url.searchParams.set('page', String(nextPageNo));
         return url.toString();
     } catch {
@@ -71,7 +71,7 @@ const buildNextPageUrl = (currentUrl, nextPageNo) => {
 // ----------------- MAIN -----------------
 
 Actor.main(async () => {
-    // Keep logs concise
+    // Reduce noise – show only useful info / warnings
     log.setLevel(log.LEVELS.INFO);
 
     const input = (await Actor.getInput()) || {};
@@ -86,7 +86,7 @@ Actor.main(async () => {
         startUrl,
         startUrls,
         url,
-        proxyConfiguration,
+        proxyConfiguration, // passed through to Apify proxy
     } = input;
 
     const RESULTS_WANTED = parseNumber(RESULTS_WANTED_RAW, 100);
@@ -126,38 +126,57 @@ Actor.main(async () => {
         await requestQueue.addRequest(req);
     }
 
-    const proxyConfig = proxyConfiguration
-        ? await Actor.createProxyConfiguration(proxyConfiguration)
-        : undefined;
+    // IMPORTANT: always call createProxyConfiguration so Apify UI settings are used.
+    const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
     let saved = 0;
     let detailEnqueued = 0;
     const seenJobIds = new Set();
 
-    log.info(`Starting Rozee.pk Playwright scraper; target=${RESULTS_WANTED}, maxPages=${MAX_PAGES}`);
+    log.info(`Rozee.pk Playwright scraper starting | target=${RESULTS_WANTED}, maxPages=${MAX_PAGES}`);
 
     const crawler = new PlaywrightCrawler({
         requestQueue,
         proxyConfiguration: proxyConfig,
+
+        // Use real Chrome for a more realistic fingerprint
+        launchContext: {
+            useChrome: true,
+            launchOptions: {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled',
+                ],
+            },
+        },
+
         useSessionPool: true,
         persistCookiesPerSession: true,
-        headless: true,
+        sessionPoolOptions: {
+            maxPoolSize: 20,
+            sessionOptions: {
+                maxUsageCount: 50,
+                maxAgeSecs: 24 * 60 * 60,
+            },
+        },
 
-        // Concurrency tuned to be reasonably fast but not crazy
         maxConcurrency: 10,
         minConcurrency: 2,
         maxRequestRetries: 2,
-        navigationTimeoutSecs: 30,
-        requestHandlerTimeoutSecs: 60,
+        navigationTimeoutSecs: 45,
+        requestHandlerTimeoutSecs: 70,
 
-        // Stealth + performance
         preNavigationHooks: [
             async ({ page }, gotoOptions) => {
+                // Random-ish viewport
                 await page.setViewportSize({
                     width: 1280 + Math.floor(Math.random() * 200),
                     height: 720 + Math.floor(Math.random() * 200),
                 });
 
+                // Light resource blocking
                 await page.route('**/*', (route) => {
                     const req = route.request();
                     const type = req.resourceType();
@@ -174,13 +193,12 @@ Actor.main(async () => {
         requestHandler: async ({ page, request, log: crawlerLog }) => {
             const label = request.userData.label || 'LIST';
 
-            // Once target is reached, don't crawl extra LIST pages.
             if (saved >= RESULTS_WANTED && label === 'LIST') {
-                crawlerLog.info('Target reached, skipping additional LIST pages.');
+                crawlerLog.info('Target reached; skipping further LIST pages.');
                 return;
             }
 
-            // -------- LIST PAGES --------
+            // ----- LIST PAGES -----
             if (label === 'LIST') {
                 const pageNo = request.userData.pageNo || 1;
 
@@ -188,7 +206,20 @@ Actor.main(async () => {
                     await page.waitForLoadState('domcontentloaded');
                     await page.waitForTimeout(1000 + Math.random() * 1000);
                 } catch {
-                    crawlerLog.warning(`LIST page ${page.url()} did not reach DOMContentLoaded in time.`);
+                    crawlerLog.warning(`LIST page did not reach DOMContentLoaded in time: ${request.url}`);
+                }
+
+                // Quick status check: if page is a 403 error template, stop early.
+                const isForbidden = await page.evaluate(() => {
+                    return (
+                        document.title.toLowerCase().includes('forbidden') ||
+                        document.body.innerText.trim().startsWith('403') ||
+                        document.body.innerText.toLowerCase().includes('access denied')
+                    );
+                });
+                if (isForbidden) {
+                    crawlerLog.warning(`LIST page appears forbidden (403 content): ${request.url}`);
+                    return;
                 }
 
                 let jobUrls = [];
@@ -199,11 +230,10 @@ Actor.main(async () => {
                             const href = a.getAttribute('href') || '';
                             if (!href) continue;
 
-                            // Relaxed patterns to catch Rozee job links
                             if (
                                 href.includes('-jobs-') ||
-                                /\/job\//i.test(href) ||
-                                /job-detail/i.test(href)
+                                /\/job\/\w/i.test(href) ||
+                                /jobs-\d+$/i.test(href)
                             ) {
                                 urls.add(href);
                             }
@@ -238,7 +268,7 @@ Actor.main(async () => {
                 }
 
                 crawlerLog.info(
-                    `LIST page #${pageNo} | found=${jobUrls.length}, enqueuedDetails=${newDetailRequests}, totalSaved=${saved}`,
+                    `LIST #${pageNo} | found=${jobUrls.length}, enqueuedDetails=${newDetailRequests}, totalSaved=${saved}`,
                 );
 
                 // Pagination
@@ -247,10 +277,7 @@ Actor.main(async () => {
                     if (nextUrl) {
                         await requestQueue.addRequest({
                             url: nextUrl,
-                            userData: {
-                                label: 'LIST',
-                                pageNo: pageNo + 1,
-                            },
+                            userData: { label: 'LIST', pageNo: pageNo + 1 },
                             uniqueKey: `list-${pageNo + 1}-${nextUrl}`,
                         });
                     }
@@ -259,17 +286,15 @@ Actor.main(async () => {
                 return;
             }
 
-            // -------- DETAIL PAGES --------
+            // ----- DETAIL PAGES -----
             if (label === 'DETAIL') {
-                if (!collectDetails) {
-                    return;
-                }
+                if (!collectDetails) return;
 
                 try {
                     await page.waitForLoadState('domcontentloaded');
                     await page.waitForTimeout(500 + Math.random() * 1000);
                 } catch {
-                    crawlerLog.warning(`DETAIL page ${page.url()} did not reach DOMContentLoaded in time.`);
+                    crawlerLog.warning(`DETAIL page did not reach DOMContentLoaded in time: ${request.url}`);
                 }
 
                 let jobRaw = {};
@@ -277,7 +302,7 @@ Actor.main(async () => {
                     jobRaw = await page.evaluate(() => {
                         const result = {};
 
-                        // Prefer JSON-LD JobPosting if present
+                        // 1) JSON-LD JobPosting
                         try {
                             const scripts = Array.from(
                                 document.querySelectorAll('script[type="application/ld+json"]'),
@@ -346,7 +371,7 @@ Actor.main(async () => {
                                 }
                             }
                         } catch {
-                            // ignore JSON-LD parsing errors
+                            // ignore JSON-LD errors
                         }
 
                         const getText = (sel) => {
@@ -420,7 +445,6 @@ Actor.main(async () => {
                 return;
             }
 
-            // Fallback label
             crawlerLog.warning(`Unknown label "${label}" for URL: ${request.url}`);
         },
 
@@ -435,7 +459,7 @@ Actor.main(async () => {
 
     if (saved === 0) {
         log.error(
-            'WARNING: No jobs were scraped. Check selectors, network issues, or recent changes on Rozee.pk.',
+            'WARNING: No jobs were scraped. The site is returning errors (e.g. 403). Check your proxy/IP setup and whether Rozee has changed access rules.',
         );
     } else {
         log.info(`Successfully scraped ${saved} jobs from Rozee.pk.`);
