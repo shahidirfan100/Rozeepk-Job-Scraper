@@ -68,6 +68,45 @@ const buildNextPageUrl = (currentUrl, nextPageNo) => {
     }
 };
 
+// Convert description HTML to pretty text
+const htmlToText = (html) => {
+    if (!html) return '';
+    let text = html;
+
+    // Turn some block elements into line breaks
+    text = text.replace(/<\s*br\s*\/?>/gi, '\n');
+    text = text.replace(/<\/\s*(p|div|li|h[1-6])\s*>/gi, '\n');
+
+    // Strip all remaining tags
+    text = text.replace(/<[^>]+>/g, ' ');
+
+    // Normalize whitespace & multiple blank lines
+    text = text.replace(/\r/g, '');
+    text = text.replace(/\n\s*\n+/g, '\n\n');
+
+    return cleanText(text);
+};
+
+// Normalize location like "Lahore, Lahore, Punjab, 54000, [object Object]" -> "Lahore, Punjab"
+const normalizeLocation = (loc) => {
+    if (!loc) return '';
+    const parts = loc
+        .split(',')
+        .map((p) => cleanText(p))
+        .filter(Boolean);
+
+    const unique = [];
+    for (const p of parts) {
+        if (!unique.includes(p)) {
+            unique.push(p);
+        }
+    }
+
+    // Prefer first 2 levels (City, Region)
+    const trimmed = unique.slice(0, 2);
+    return trimmed.join(', ');
+};
+
 // ----------------- MAIN -----------------
 
 Actor.main(async () => {
@@ -139,17 +178,26 @@ Actor.main(async () => {
         requestQueue,
         proxyConfiguration: proxyConfig,
 
-        // Use real Chrome for a more realistic fingerprint
+        // Use bundled Chromium (lighter than full Chrome) but hide automation as much as possible
         launchContext: {
-            useChrome: true,
             launchOptions: {
                 headless: true,
                 args: [
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-blink-features=AutomationControlled',
+                    '--disable-infobars',
                 ],
             },
+        },
+
+        // Fingerprinting for stealth
+        useFingerprints: true,
+        fingerprintOptions: {
+            browsers: ['chrome'],
+            devices: ['desktop'],
+            operatingSystems: ['windows'],
+            locales: ['en-US', 'en-PK'],
         },
 
         useSessionPool: true,
@@ -162,11 +210,11 @@ Actor.main(async () => {
             },
         },
 
-        maxConcurrency: 10,
+        maxConcurrency: 8, // autoscaled; will stay low if CPU is tight
         minConcurrency: 2,
         maxRequestRetries: 2,
-        navigationTimeoutSecs: 45,
-        requestHandlerTimeoutSecs: 70,
+        navigationTimeoutSecs: 25,
+        requestHandlerTimeoutSecs: 50,
 
         preNavigationHooks: [
             async ({ page }, gotoOptions) => {
@@ -176,11 +224,11 @@ Actor.main(async () => {
                     height: 720 + Math.floor(Math.random() * 200),
                 });
 
-                // Light resource blocking
+                // Lightweight resource blocking
                 await page.route('**/*', (route) => {
                     const req = route.request();
                     const type = req.resourceType();
-                    if (['image', 'media', 'font'].includes(type)) {
+                    if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
                         return route.abort();
                     }
                     return route.continue();
@@ -204,21 +252,24 @@ Actor.main(async () => {
 
                 try {
                     await page.waitForLoadState('domcontentloaded');
-                    await page.waitForTimeout(1000 + Math.random() * 1000);
+                    // Short jitter instead of huge sleeps
+                    await page.waitForTimeout(500 + Math.random() * 500);
                 } catch {
                     crawlerLog.warning(`LIST page did not reach DOMContentLoaded in time: ${request.url}`);
                 }
 
-                // Quick status check: if page is a 403 error template, stop early.
-                const isForbidden = await page.evaluate(() => {
+                // Quick 403 / block check from content (some proxies return 200 + error page)
+                const looksForbidden = await page.evaluate(() => {
+                    const bodyText = document.body?.innerText?.toLowerCase() || '';
                     return (
                         document.title.toLowerCase().includes('forbidden') ||
-                        document.body.innerText.trim().startsWith('403') ||
-                        document.body.innerText.toLowerCase().includes('access denied')
+                        bodyText.startsWith('403') ||
+                        bodyText.includes('access denied') ||
+                        bodyText.includes('request blocked')
                     );
                 });
-                if (isForbidden) {
-                    crawlerLog.warning(`LIST page appears forbidden (403 content): ${request.url}`);
+                if (looksForbidden) {
+                    crawlerLog.warning(`LIST page appears forbidden (content-based): ${request.url}`);
                     return;
                 }
 
@@ -230,11 +281,8 @@ Actor.main(async () => {
                             const href = a.getAttribute('href') || '';
                             if (!href) continue;
 
-                            if (
-                                href.includes('-jobs-') ||
-                                /\/job\/\w/i.test(href) ||
-                                /jobs-\d+$/i.test(href)
-                            ) {
+                            // Rozee job detail links look like "...-jobs-<id>"
+                            if (/-jobs-\d+/i.test(href)) {
                                 urls.add(href);
                             }
                         }
@@ -292,7 +340,7 @@ Actor.main(async () => {
 
                 try {
                     await page.waitForLoadState('domcontentloaded');
-                    await page.waitForTimeout(500 + Math.random() * 1000);
+                    await page.waitForTimeout(300 + Math.random() * 500);
                 } catch {
                     crawlerLog.warning(`DETAIL page did not reach DOMContentLoaded in time: ${request.url}`);
                 }
@@ -301,6 +349,13 @@ Actor.main(async () => {
                 try {
                     jobRaw = await page.evaluate(() => {
                         const result = {};
+
+                        const normVal = (v) => {
+                            if (!v) return null;
+                            if (typeof v === 'string') return v.trim();
+                            if (typeof v === 'object' && v.name) return String(v.name).trim();
+                            return null;
+                        };
 
                         // 1) JSON-LD JobPosting
                         try {
@@ -323,21 +378,30 @@ Actor.main(async () => {
                                             const org = item.hiringOrganization;
                                             result.company =
                                                 result.company ||
-                                                org.name ||
-                                                (typeof org === 'string' ? org : null);
+                                                normVal(org) ||
+                                                normVal(org.name) ||
+                                                null;
                                         }
 
-                                        const addr = item.jobLocation?.address;
-                                        if (addr && !result.location) {
-                                            const parts = [
-                                                addr.streetAddress,
-                                                addr.addressLocality,
-                                                addr.addressRegion,
-                                                addr.postalCode,
-                                                addr.addressCountry,
-                                            ].filter(Boolean);
-                                            if (parts.length) {
-                                                result.location = parts.join(', ');
+                                        const jobLoc = item.jobLocation;
+                                        if (jobLoc && !result.location) {
+                                            const addr = Array.isArray(jobLoc)
+                                                ? jobLoc[0]?.address
+                                                : jobLoc.address;
+                                            if (addr) {
+                                                const parts = [
+                                                    normVal(addr.addressLocality),
+                                                    normVal(addr.addressRegion),
+                                                    normVal(addr.addressCountry),
+                                                ].filter(Boolean);
+                                                if (parts.length) {
+                                                    // e.g. "Lahore, Punjab, Pakistan"
+                                                    const unique = [];
+                                                    for (const p of parts) {
+                                                        if (!unique.includes(p)) unique.push(p);
+                                                    }
+                                                    result.location = unique.join(', ');
+                                                }
                                             }
                                         }
 
@@ -395,10 +459,11 @@ Actor.main(async () => {
                         }
 
                         if (!result.location) {
-                            result.location =
+                            const loc =
                                 getText('.location') ||
                                 getText('.job-location') ||
                                 getText('[itemprop="jobLocation"]');
+                            if (loc) result.location = loc;
                         }
 
                         if (!result.description_html) {
@@ -418,15 +483,19 @@ Actor.main(async () => {
                     return;
                 }
 
+                const rawLocation = jobRaw.location || '';
+                const normalizedLocation = normalizeLocation(rawLocation);
+
                 const job = {
                     source: 'rozee.pk',
                     url: request.url,
                     title: cleanText(jobRaw.title),
                     company: cleanText(jobRaw.company),
-                    location: cleanText(jobRaw.location),
+                    location: normalizedLocation,
                     salary: cleanText(jobRaw.salary),
                     contract_type: cleanText(jobRaw.contract_type),
                     description_html: jobRaw.description_html || null,
+                    description_text: htmlToText(jobRaw.description_html || ''),
                     date_posted: jobRaw.date_posted || null,
                 };
 
@@ -459,7 +528,7 @@ Actor.main(async () => {
 
     if (saved === 0) {
         log.error(
-            'WARNING: No jobs were scraped. The site is returning errors (e.g. 403). Check your proxy/IP setup and whether Rozee has changed access rules.',
+            'WARNING: No jobs were scraped. The site may be blocking requests or has changed its structure.',
         );
     } else {
         log.info(`Successfully scraped ${saved} jobs from Rozee.pk.`);
