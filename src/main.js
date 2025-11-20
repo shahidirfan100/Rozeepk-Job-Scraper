@@ -191,15 +191,6 @@ Actor.main(async () => {
             },
         },
 
-        // Fingerprinting for stealth
-        useFingerprints: true,
-        fingerprintOptions: {
-            browsers: ['chrome'],
-            devices: ['desktop'],
-            operatingSystems: ['windows'],
-            locales: ['en-US', 'en-PK'],
-        },
-
         useSessionPool: true,
         persistCookiesPerSession: true,
         sessionPoolOptions: {

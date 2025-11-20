@@ -2,6 +2,7 @@
   "name": "rozeepk-jobs-actor",
   "version": "1.0.0",
   "description": "RozeePk jobs scraper using Playwright for JavaScript rendering.",
+  "type": "module",
 "dependencies": {
         "apify": "^3.4.2",
         "crawlee": "^3.13.8",
