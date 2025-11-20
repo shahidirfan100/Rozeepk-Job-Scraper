@@ -168,6 +168,9 @@ Actor.main(async () => {
     let detailEnqueued = 0;
     const seenJobIds = new Set();
 
+    // Cap how many detail requests we enqueue per LIST page burst to avoid huge spikes
+    const MAX_DETAILS_PER_LIST_PAGE = 15;
+
     log.info(`Rozee.pk Playwright scraper starting | target=${RESULTS_WANTED}, maxPages=${MAX_PAGES}`);
 
     const crawler = new PlaywrightCrawler({
@@ -190,7 +193,6 @@ Actor.main(async () => {
         // Anti-blocking / session management
         useSessionPool: true,
         persistCookiesPerSession: true,
-        retryOnBlocked: true,
         sessionPoolOptions: {
             maxPoolSize: 40, // 4GB RAM allows more sessions
             sessionOptions: {
@@ -201,11 +203,12 @@ Actor.main(async () => {
         },
 
         // 4 GB → we can afford higher concurrency; AutoscaledPool still respects CPU/mem
-        maxConcurrency: 16,
-        minConcurrency: 4,
-        maxRequestRetries: 2,
-        navigationTimeoutSecs: 25,
-        requestHandlerTimeoutSecs: 50,
+        maxConcurrency: 6,
+        minConcurrency: 2,
+        // We explicitly keep retries low to avoid wasting time on slow detail pages
+        maxRequestRetries: 0,
+        navigationTimeoutSecs: 12,
+        requestHandlerTimeoutSecs: 40,
 
         preNavigationHooks: [
             async ({ page }, gotoOptions) => {
@@ -215,10 +218,10 @@ Actor.main(async () => {
                     height: 720 + Math.floor(Math.random() * 200),
                 });
 
-                // Block heavy resources for speed
+                // Block heavy resources for speed (KEEP CSS!)
                 await page.route('**/*', (route) => {
                     const type = route.request().resourceType();
-                    if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+                    if (type === 'image' || type === 'media' || type === 'font') {
                         return route.abort();
                     }
                     return route.continue();
@@ -243,15 +246,15 @@ Actor.main(async () => {
 
                 try {
                     // Wait for DOM + actual job links instead of blind sleeps
-                    await page.waitForLoadState('domcontentloaded');
-                    await page.waitForSelector('a[href*="-jobs-"]', { timeout: 10000 });
+                    await page.waitForLoadState('domcontentloaded', { timeout: 12000 });
+                    await page.waitForSelector('a[href*="-jobs-"]', { timeout: 8000 });
                 } catch {
                     crawlerLog.warning(
-                        `LIST page did not load job links in time (possible block): ${request.url}`,
+                        `LIST page did not load job links in time (possible block / slow page): ${request.url}`,
                     );
                 }
 
-                // Content-based block detection (403 pages returned as 200)
+                // Content-based block detection (403-style pages returned as 200)
                 const looksForbidden = await page.evaluate(() => {
                     const bodyText = document.body?.innerText?.toLowerCase() || '';
                     return (
@@ -288,6 +291,7 @@ Actor.main(async () => {
                 let newDetailRequests = 0;
                 for (const href of jobUrls) {
                     if (saved + detailEnqueued >= RESULTS_WANTED) break;
+                    if (newDetailRequests >= MAX_DETAILS_PER_LIST_PAGE) break;
 
                     const absUrl = toAbs(href, request.url);
                     if (!absUrl) continue;
@@ -336,12 +340,15 @@ Actor.main(async () => {
                 }
 
                 try {
-                    await page.waitForLoadState('domcontentloaded');
-                    // Small jitter to mimic user-y delay, not huge
-                    await page.waitForTimeout(300 + Math.random() * 400);
+                    await page.waitForLoadState('domcontentloaded', { timeout: 12000 });
+                    // Wait for job content selector instead of random sleep
+                    await page.waitForSelector(
+                        '.job-description, #job-description, [itemprop="description"]',
+                        { timeout: 8000 },
+                    );
                 } catch {
                     crawlerLog.warning(
-                        `DETAIL page did not reach DOMContentLoaded in time: ${request.url}`,
+                        `DETAIL page did not load main job content in time: ${request.url}`,
                     );
                 }
 
