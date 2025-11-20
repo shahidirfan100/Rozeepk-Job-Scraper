@@ -178,7 +178,7 @@ Actor.main(async () => {
         requestQueue,
         proxyConfiguration: proxyConfig,
 
-        // Use bundled Chromium (lighter than full Chrome) but hide automation as much as possible
+        // Use bundled Chromium with stealthy flags
         launchContext: {
             launchOptions: {
                 headless: true,
@@ -191,8 +191,9 @@ Actor.main(async () => {
             },
         },
 
+        // Session & cookie management for stealth
         useSessionPool: true,
-        persistCookiesPerSession: true,
+        persistCookiesPerSession: true, // valid for PlaywrightCrawler :contentReference[oaicite:1]{index=1}
         sessionPoolOptions: {
             maxPoolSize: 20,
             sessionOptions: {
@@ -201,7 +202,7 @@ Actor.main(async () => {
             },
         },
 
-        maxConcurrency: 8, // autoscaled; will stay low if CPU is tight
+        maxConcurrency: 8, // autoscaled; kept moderate for CPU/RAM
         minConcurrency: 2,
         maxRequestRetries: 2,
         navigationTimeoutSecs: 25,
@@ -215,7 +216,7 @@ Actor.main(async () => {
                     height: 720 + Math.floor(Math.random() * 200),
                 });
 
-                // Lightweight resource blocking
+                // Lightweight resource blocking for speed
                 await page.route('**/*', (route) => {
                     const req = route.request();
                     const type = req.resourceType();
@@ -243,7 +244,7 @@ Actor.main(async () => {
 
                 try {
                     await page.waitForLoadState('domcontentloaded');
-                    // Short jitter instead of huge sleeps
+                    // Small jitter; we don't want to sleep too long
                     await page.waitForTimeout(500 + Math.random() * 500);
                 } catch {
                     crawlerLog.warning(`LIST page did not reach DOMContentLoaded in time: ${request.url}`);
@@ -386,11 +387,11 @@ Actor.main(async () => {
                                                     normVal(addr.addressCountry),
                                                 ].filter(Boolean);
                                                 if (parts.length) {
-                                                    // e.g. "Lahore, Punjab, Pakistan"
                                                     const unique = [];
                                                     for (const p of parts) {
                                                         if (!unique.includes(p)) unique.push(p);
                                                     }
+                                                    // e.g. "Lahore, Punjab, Pakistan"
                                                     result.location = unique.join(', ');
                                                 }
                                             }
