@@ -1,4 +1,3 @@
-// Rozee.pk Playwright-only scraper: high stealth, high performance
 import { Actor, log } from 'apify';
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 
@@ -69,21 +68,26 @@ const buildNextPageUrl = (currentUrl, nextPageNo) => {
     }
 };
 
-// Convert description HTML to readable text
+// Convert description HTML to pretty text
 const htmlToText = (html) => {
     if (!html) return '';
     let text = html;
 
+    // Turn some block elements into line breaks
     text = text.replace(/<\s*br\s*\/?>/gi, '\n');
     text = text.replace(/<\/\s*(p|div|li|h[1-6])\s*>/gi, '\n');
-    text = text.replace(/<[^>]+>/g, ' '); // strip remaining tags
+
+    // Strip all remaining tags
+    text = text.replace(/<[^>]+>/g, ' ');
+
+    // Normalize whitespace & multiple blank lines
     text = text.replace(/\r/g, '');
     text = text.replace(/\n\s*\n+/g, '\n\n');
 
     return cleanText(text);
 };
 
-// "Lahore, Lahore, Punjab, 54000, [object Object]" -> "Lahore, Punjab"
+// Normalize location like "Lahore, Lahore, Punjab, 54000, [object Object]" -> "Lahore, Punjab"
 const normalizeLocation = (loc) => {
     if (!loc) return '';
     const parts = loc
@@ -93,10 +97,12 @@ const normalizeLocation = (loc) => {
 
     const unique = [];
     for (const p of parts) {
-        if (!unique.includes(p)) unique.push(p);
+        if (!unique.includes(p)) {
+            unique.push(p);
+        }
     }
 
-    // Prefer city + region
+    // Prefer first 2 levels (City, Region)
     const trimmed = unique.slice(0, 2);
     return trimmed.join(', ');
 };
@@ -104,7 +110,7 @@ const normalizeLocation = (loc) => {
 // ----------------- MAIN -----------------
 
 Actor.main(async () => {
-    // Concise but useful logs
+    // Reduce noise – show only useful info / warnings
     log.setLevel(log.LEVELS.INFO);
 
     const input = (await Actor.getInput()) || {};
@@ -119,15 +125,13 @@ Actor.main(async () => {
         startUrl,
         startUrls,
         url,
-        proxyConfiguration, // Apify proxy / residential config
+        proxyConfiguration, // passed through to Apify proxy
     } = input;
 
     const RESULTS_WANTED = parseNumber(RESULTS_WANTED_RAW, 100);
     const MAX_PAGES = parseNumber(MAX_PAGES_RAW, 999);
 
     const requestQueue = await Actor.openRequestQueue();
-
-    // ---------- Initial URLs ----------
 
     const startRequests = [];
 
@@ -161,15 +165,12 @@ Actor.main(async () => {
         await requestQueue.addRequest(req);
     }
 
-    // Use Apify proxy / passed proxy configuration
+    // IMPORTANT: always call createProxyConfiguration so Apify UI settings are used.
     const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
     let saved = 0;
     let detailEnqueued = 0;
     const seenJobIds = new Set();
-
-    // Cap how many detail requests we enqueue per LIST page burst to avoid huge spikes
-    const MAX_DETAILS_PER_LIST_PAGE = 15;
 
     log.info(`Rozee.pk Playwright scraper starting | target=${RESULTS_WANTED}, maxPages=${MAX_PAGES}`);
 
@@ -177,7 +178,7 @@ Actor.main(async () => {
         requestQueue,
         proxyConfiguration: proxyConfig,
 
-        // Headless Chromium with stealthy flags
+        // Use bundled Chromium with stealthy flags
         launchContext: {
             launchOptions: {
                 headless: true,
@@ -190,38 +191,36 @@ Actor.main(async () => {
             },
         },
 
-        // Anti-blocking / session management
+        // Session & cookie management for stealth
         useSessionPool: true,
-        persistCookiesPerSession: true,
+        persistCookiesPerSession: true, // valid for PlaywrightCrawler :contentReference[oaicite:1]{index=1}
         sessionPoolOptions: {
-            maxPoolSize: 40, // 4GB RAM allows more sessions
+            maxPoolSize: 20,
             sessionOptions: {
-                maxUsageCount: 20,
-                maxAgeSecs: 6 * 60 * 60,
-                maxErrorScore: 3,
+                maxUsageCount: 50,
+                maxAgeSecs: 24 * 60 * 60,
             },
         },
 
-        // 4 GB → we can afford higher concurrency; AutoscaledPool still respects CPU/mem
-        maxConcurrency: 6,
+        maxConcurrency: 8, // autoscaled; kept moderate for CPU/RAM
         minConcurrency: 2,
-        // We explicitly keep retries low to avoid wasting time on slow detail pages
-        maxRequestRetries: 0,
-        navigationTimeoutSecs: 12,
-        requestHandlerTimeoutSecs: 40,
+        maxRequestRetries: 2,
+        navigationTimeoutSecs: 25,
+        requestHandlerTimeoutSecs: 50,
 
         preNavigationHooks: [
             async ({ page }, gotoOptions) => {
-                // Random-ish viewport for each page
+                // Random-ish viewport
                 await page.setViewportSize({
                     width: 1280 + Math.floor(Math.random() * 200),
                     height: 720 + Math.floor(Math.random() * 200),
                 });
 
-                // Block heavy resources for speed (KEEP CSS!)
+                // Lightweight resource blocking for speed
                 await page.route('**/*', (route) => {
-                    const type = route.request().resourceType();
-                    if (type === 'image' || type === 'media' || type === 'font') {
+                    const req = route.request();
+                    const type = req.resourceType();
+                    if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
                         return route.abort();
                     }
                     return route.continue();
@@ -231,30 +230,27 @@ Actor.main(async () => {
             },
         ],
 
-        requestHandler: async ({ page, request, session, log: crawlerLog }) => {
+        requestHandler: async ({ page, request, log: crawlerLog }) => {
             const label = request.userData.label || 'LIST';
 
             if (saved >= RESULTS_WANTED && label === 'LIST') {
                 crawlerLog.info('Target reached; skipping further LIST pages.');
-                session?.markGood();
                 return;
             }
 
-            // ---------- LIST PAGES ----------
+            // ----- LIST PAGES -----
             if (label === 'LIST') {
                 const pageNo = request.userData.pageNo || 1;
 
                 try {
-                    // Wait for DOM + actual job links instead of blind sleeps
-                    await page.waitForLoadState('domcontentloaded', { timeout: 12000 });
-                    await page.waitForSelector('a[href*="-jobs-"]', { timeout: 8000 });
+                    await page.waitForLoadState('domcontentloaded');
+                    // Small jitter; we don't want to sleep too long
+                    await page.waitForTimeout(500 + Math.random() * 500);
                 } catch {
-                    crawlerLog.warning(
-                        `LIST page did not load job links in time (possible block / slow page): ${request.url}`,
-                    );
+                    crawlerLog.warning(`LIST page did not reach DOMContentLoaded in time: ${request.url}`);
                 }
 
-                // Content-based block detection (403-style pages returned as 200)
+                // Quick 403 / block check from content (some proxies return 200 + error page)
                 const looksForbidden = await page.evaluate(() => {
                     const bodyText = document.body?.innerText?.toLowerCase() || '';
                     return (
@@ -266,7 +262,6 @@ Actor.main(async () => {
                 });
                 if (looksForbidden) {
                     crawlerLog.warning(`LIST page appears forbidden (content-based): ${request.url}`);
-                    session?.markBad();
                     return;
                 }
 
@@ -277,7 +272,8 @@ Actor.main(async () => {
                         for (const a of anchors) {
                             const href = a.getAttribute('href') || '';
                             if (!href) continue;
-                            // Rozee job detail links typically "...-jobs-<id>"
+
+                            // Rozee job detail links look like "...-jobs-<id>"
                             if (/-jobs-\d+/i.test(href)) {
                                 urls.add(href);
                             }
@@ -291,7 +287,6 @@ Actor.main(async () => {
                 let newDetailRequests = 0;
                 for (const href of jobUrls) {
                     if (saved + detailEnqueued >= RESULTS_WANTED) break;
-                    if (newDetailRequests >= MAX_DETAILS_PER_LIST_PAGE) break;
 
                     const absUrl = toAbs(href, request.url);
                     if (!absUrl) continue;
@@ -328,28 +323,18 @@ Actor.main(async () => {
                     }
                 }
 
-                session?.markGood();
                 return;
             }
 
-            // ---------- DETAIL PAGES ----------
+            // ----- DETAIL PAGES -----
             if (label === 'DETAIL') {
-                if (!collectDetails) {
-                    session?.markGood();
-                    return;
-                }
+                if (!collectDetails) return;
 
                 try {
-                    await page.waitForLoadState('domcontentloaded', { timeout: 12000 });
-                    // Wait for job content selector instead of random sleep
-                    await page.waitForSelector(
-                        '.job-description, #job-description, [itemprop="description"]',
-                        { timeout: 8000 },
-                    );
+                    await page.waitForLoadState('domcontentloaded');
+                    await page.waitForTimeout(300 + Math.random() * 500);
                 } catch {
-                    crawlerLog.warning(
-                        `DETAIL page did not load main job content in time: ${request.url}`,
-                    );
+                    crawlerLog.warning(`DETAIL page did not reach DOMContentLoaded in time: ${request.url}`);
                 }
 
                 let jobRaw = {};
@@ -406,6 +391,7 @@ Actor.main(async () => {
                                                     for (const p of parts) {
                                                         if (!unique.includes(p)) unique.push(p);
                                                     }
+                                                    // e.g. "Lahore, Punjab, Pakistan"
                                                     result.location = unique.join(', ');
                                                 }
                                             }
@@ -486,7 +472,6 @@ Actor.main(async () => {
                     });
                 } catch (e) {
                     crawlerLog.exception(e, `Failed to extract job data from DETAIL page: ${request.url}`);
-                    session?.markBad();
                     return;
                 }
 
@@ -508,7 +493,6 @@ Actor.main(async () => {
 
                 if (!validateJobItem(job)) {
                     crawlerLog.warning(`Skipping invalid job from ${request.url}`);
-                    session?.markBad();
                     return;
                 }
 
@@ -519,17 +503,14 @@ Actor.main(async () => {
                     crawlerLog.info(`Saved ${saved} jobs so far.`);
                 }
 
-                session?.markGood();
                 return;
             }
 
             crawlerLog.warning(`Unknown label "${label}" for URL: ${request.url}`);
-            session?.markBad();
         },
 
-        failedRequestHandler: async ({ request, error, session, log: crawlerLog }) => {
+        failedRequestHandler: async ({ request, error, log: crawlerLog }) => {
             crawlerLog.exception(error, `Request failed for ${request.url}`);
-            if (session) session.markBad();
         },
     });
 
